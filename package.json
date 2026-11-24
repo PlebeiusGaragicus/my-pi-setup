@@ -20,6 +20,7 @@
       "extensions/save.ts",
       "extensions/say.ts",
       "extensions/theme-cycler.ts",
+      "extensions/focus.ts",
       "extensions/debug-system-prompt.ts"
     ],
     "skills": [
