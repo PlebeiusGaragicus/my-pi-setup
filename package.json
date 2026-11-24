@@ -1,0 +1,35 @@
+{
+  "name": "my-pi-setup",
+  "version": "0.1.0",
+  "description": "PlebbyG's personal Pi setup: themes, status line, notifications, TTS, prompt templates, and skills.",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PlebeiusGaragicus/my-pi-setup.git"
+  },
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "extensions/api-keys.ts",
+      "extensions/run-timer.ts",
+      "extensions/tps.ts",
+      "extensions/run-finish-notify.ts",
+      "extensions/save.ts",
+      "extensions/say.ts",
+      "extensions/theme-cycler.ts",
+      "extensions/debug-system-prompt.ts"
+    ],
+    "skills": [
+      "skills"
+    ],
+    "prompts": [
+      "prompts"
+    ],
+    "themes": [
+      "themes"
+    ]
+  }
+}
