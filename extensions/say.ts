@@ -1,5 +1,5 @@
 /**
- * TTS — speaks assistant text with macOS `say` or Linux `espeak-ng`.
+ * TTS — speaks assistant text with Piper (Linux, preferred), macOS `say`, or Linux `espeak-ng`.
  *
  * - Auto TTS: off by default, or pass `--tts-enable` (e.g. in `pi-args`) for auto TTS on. On every
  *   `session_start` (startup, `/new`, `/resume`, etc.), auto TTS is re-read from that flag so it
@@ -19,14 +19,23 @@
  * - Speech rate: per-device WPM stored in `~/.pi/my-pi-setup/.env` (`SAY_TTS_WPM`, default 300). Adjust with `/tts-wpm`.
  * - A new user prompt, `/stop-speaking`, `/tts-toggle off`, or pi exiting all cancel speech.
  *
- * Platform backends are selected inline. Currently: macOS `say`, Linux `espeak-ng`.
+ * Backends, first match wins:
+ *   1. Piper (any OS) — `piper` on PATH plus a voice. Voice and speed come from
+ *      `~/.config/say/config` (`PIPER_MODEL`, `SAY_SPEED`; shared with other `say` tools), else the
+ *      first `~/.local/share/piper/*.onnx` at speed 1.0. Audio plays through `paplay` or `aplay`.
+ *      `SAY_TTS_WPM` / `/tts-wpm` do not apply; set `SAY_SPEED` instead.
+ *   2. macOS `say`.
+ *   3. Linux `espeak-ng`.
  *
- * Common-bundle note: kept as one file so pi’s loader resolves cleanly through symlinked agent
- * `extensions/` trees. Linux needs `espeak-ng` on PATH (`apt install espeak-ng` on Debian/Ubuntu).
+ * Each utterance runs in its own process group so pausing (pre-warm) and stopping reach the
+ * whole Piper → player pipeline, not just the wrapper shell.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { readEnv, writeEnv } from "../lib/env.js";
 
 interface TtsBackend {
@@ -36,24 +45,90 @@ interface TtsBackend {
 
 function spawnTtsChild(bin: string, args: string[], text: string, paused: boolean): ChildProcess {
 	const child = spawn(bin, args, {
-		stdio: ["pipe", "ignore", "inherit"],
+		stdio: ["pipe", "ignore", "ignore"],
+		detached: true, // own process group, so signalTree() reaches pipelines too
 	});
 	try {
 		child.stdin?.end(text);
 	} catch {
 		/* child may have died before we could write */
 	}
-	if (paused) {
-		try {
-			child.kill("SIGSTOP");
-		} catch {
-			/* ignore */
-		}
-	}
+	if (paused) signalTree(child, "SIGSTOP");
 	return child;
 }
 
+/** Signal the child's whole process group (falls back to the child alone). */
+function signalTree(child: ChildProcess, sig: NodeJS.Signals): void {
+	try {
+		if (child.pid) process.kill(-child.pid, sig);
+		else child.kill(sig);
+	} catch {
+		try {
+			child.kill(sig);
+		} catch {
+			/* already gone */
+		}
+	}
+}
+
+function onPath(bin: string): boolean {
+	try {
+		return spawnSync("which", [bin], { stdio: "ignore" }).status === 0;
+	} catch {
+		return false;
+	}
+}
+
+/** Piper voice + speed from ~/.config/say/config, else the first installed voice at 1.0x. */
+function resolvePiper(): { model: string; scale: string; rate: string; player: string } | null {
+	if (!onPath("piper")) return null;
+	const home = os.homedir();
+	const config: Record<string, string> = {};
+	try {
+		for (const line of fs.readFileSync(path.join(home, ".config", "say", "config"), "utf8").split("\n")) {
+			const m = line.trim().match(/^(?:export\s+)?([A-Z_]+)=["']?(.*?)["']?$/);
+			if (m) config[m[1]] = m[2].replace(/^\$HOME|^~/, home);
+		}
+	} catch {
+		/* no shared config */
+	}
+	let model = process.env.PIPER_MODEL || config.PIPER_MODEL || "";
+	if (!model) {
+		const dir = path.join(home, ".local", "share", "piper");
+		try {
+			const first = fs.readdirSync(dir).filter((f) => f.endsWith(".onnx")).sort()[0];
+			if (first) model = path.join(dir, first);
+		} catch {
+			/* no voices */
+		}
+	}
+	if (!model || !fs.existsSync(model)) return null;
+	let rate = "22050";
+	try {
+		rate = String(JSON.parse(fs.readFileSync(`${model}.json`, "utf8")).audio?.sample_rate ?? rate);
+	} catch {
+		/* default rate */
+	}
+	const speed = Number.parseFloat(process.env.SAY_SPEED || config.SAY_SPEED || "1") || 1;
+	const player = onPath("paplay")
+		? 'paplay --raw --rate="$3" --format=s16le --channels=1'
+		: onPath("aplay")
+			? 'aplay -q -r "$3" -f S16_LE -t raw -c 1'
+			: "";
+	if (!player) return null;
+	return { model, scale: (1 / speed).toFixed(3), rate, player };
+}
+
 function resolveBackend(): TtsBackend | null {
+	const piper = resolvePiper();
+	if (piper) {
+		const script = `piper -m "$1" --length-scale "$2" --output-raw 2>/dev/null | ${piper.player}`;
+		return {
+			name: "piper",
+			spawn: (text, _rateWpm, paused) =>
+				spawnTtsChild("sh", ["-c", script, "sh", piper.model, piper.scale, piper.rate], text, paused),
+		};
+	}
 	if (process.platform === "darwin") {
 		return {
 			name: "macos-say",
@@ -61,15 +136,11 @@ function resolveBackend(): TtsBackend | null {
 		};
 	}
 	if (process.platform === "linux") {
-		try {
-			if (spawnSync("which", ["espeak-ng"], { stdio: "ignore" }).status === 0) {
-				return {
-					name: "linux-espeak-ng",
-					spawn: (text, rateWpm, paused) => spawnTtsChild("espeak-ng", ["-s", String(rateWpm), "--stdin"], text, paused),
-				};
-			}
-		} catch {
-			/* espeak-ng not available */
+		if (onPath("espeak-ng")) {
+			return {
+				name: "linux-espeak-ng",
+				spawn: (text, rateWpm, paused) => spawnTtsChild("espeak-ng", ["-s", String(rateWpm), "--stdin"], text, paused),
+			};
 		}
 	}
 	return null;
@@ -122,11 +193,7 @@ let exitHandlersInstalled = false;
 
 function killChild(c: ChildProcess | null | undefined): void {
 	if (!c) return;
-	try {
-		c.kill("SIGKILL");
-	} catch {
-		/* ignore — process may already be dead */
-	}
+	signalTree(c, "SIGKILL");
 }
 
 function stopSay(): void {
@@ -138,11 +205,7 @@ function stopSay(): void {
 	// processes queue signals but our SIGKILL should go through regardless; doing the
 	// SIGCONT first is belt-and-suspenders).
 	if (pen) {
-		try {
-			pen.child.kill("SIGCONT");
-		} catch {
-			/* ignore */
-		}
+		signalTree(pen.child, "SIGCONT");
 		killChild(pen.child);
 	}
 	killChild(cur);
@@ -285,11 +348,7 @@ function startSpeaking(text: string): void {
 		};
 		pen.on("exit", clear);
 		pen.on("error", clear);
-		try {
-			pen.kill("SIGCONT");
-		} catch {
-			/* ignore */
-		}
+		signalTree(pen, "SIGCONT");
 	} else {
 		const child = backend!.spawn(text, currentWpm, false);
 		currentSay = child;
@@ -371,11 +430,7 @@ function installExitHandlers(): void {
 	const killOnExit = (): void => {
 		// Resume any SIGSTOPped pending child so our SIGKILL definitely takes it down.
 		if (pendingSay) {
-			try {
-				pendingSay.child.kill("SIGCONT");
-			} catch {
-				/* ignore */
-			}
+			signalTree(pendingSay.child, "SIGCONT");
 			killChild(pendingSay.child);
 			pendingSay = null;
 		}
@@ -397,7 +452,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerFlag("tts-enable", {
 		type: "boolean",
 		default: false,
-		description: "Enable automatic TTS after each assistant reply (macOS say / Linux espeak-ng)",
+		description: "Enable automatic TTS after each assistant reply (Piper, macOS say, or espeak-ng)",
 	});
 
 	pi.on("session_start", async () => {
@@ -538,6 +593,10 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 			const a = args.trim();
+			if (backend?.name === "piper") {
+				ctx.ui.notify("Piper ignores WPM: set SAY_SPEED (e.g. 1.2) in ~/.config/say/config", "info");
+				return;
+			}
 			if (!a) {
 				ctx.ui.notify(`TTS speed: ${currentWpm} WPM`, "info");
 				return;
