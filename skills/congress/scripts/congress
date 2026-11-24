@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""U.S. legislation from the Congress.gov API (v3). Python 3 standard library only.
+
+  congress search "words in the bill title" [--congress N] [--type hr|s|...]
+  congress bill CONGRESS TYPE NUMBER          e.g. congress bill 118 hr 3076
+
+Needs CONGRESS_GOV_API_KEY (free) in the shell environment or ~/.pi/my-pi-setup/.env.
+"""
+
+import argparse
+import json
+import os
+import sys
+import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+
+API = "https://api.congress.gov/v3/"
+KEY_NAME = "CONGRESS_GOV_API_KEY"
+BILL_TYPES = ["hr", "s", "hjres", "sjres", "hconres", "sconres", "hres", "sres"]
+URL_SLUG = {"hr": "house-bill", "s": "senate-bill", "hjres": "house-joint-resolution",
+            "sjres": "senate-joint-resolution", "hconres": "house-concurrent-resolution",
+            "sconres": "senate-concurrent-resolution", "hres": "house-resolution", "sres": "senate-resolution"}
+SCAN_PAGES = 4  # search scans this many pages of 250 recent bills
+
+
+def load_key(name):
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = os.environ.get("MY_PI_ENV_FILE") or os.path.expanduser("~/.pi/my-pi-setup/.env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, sep, val = line.strip().removeprefix("export ").partition("=")
+                if sep and key.strip() == name:
+                    return val.strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def get(path, **params):
+    key = load_key(KEY_NAME)
+    if not key:
+        fail(f"{KEY_NAME} is not set. Ask the user to run /my-pi-api-keys in Pi "
+             "(free key at api.congress.gov/sign-up). Do not retry until it is set.")
+    params["format"] = "json"
+    url = path if path.startswith("http") else API + path.lstrip("/")
+    url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+    request = urllib.request.Request(url, headers={"x-api-key": key, "User-Agent": "my-pi-setup-congress/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            fail("not found. Check the congress number, bill type, and bill number.")
+        detail = exc.read().decode("utf-8", errors="replace").strip()[:300]
+        hint = f" Check {KEY_NAME}." if exc.code == 403 else ""
+        fail(f"Congress.gov HTTP {exc.code}.{hint} {detail}")
+    except urllib.error.URLError as exc:
+        fail(f"could not reach Congress.gov: {exc.reason}")
+
+
+def strip_html(value):
+    class _T(HTMLParser):
+        parts = []
+
+        def handle_data(self, data):
+            self.parts.append(data)
+
+    parser = _T()
+    parser.parts = []
+    parser.feed(value or "")
+    return " ".join("".join(parser.parts).split())
+
+
+def ordinal(n):
+    n = int(n)
+    suffix = "th" if 10 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def bill_url(congress, bill_type, number):
+    return f"https://www.congress.gov/bill/{ordinal(congress)}-congress/{URL_SLUG.get(bill_type, bill_type)}/{number}"
+
+
+def current_congress():
+    data = get("congress/current")
+    return int(data["congress"]["number"])
+
+
+def search(args):
+    words = [w.lower() for w in args.words]
+    congress = args.congress or current_congress()
+    path = f"bill/{congress}" + (f"/{args.type}" if args.type else "")
+    matches, data, pages = [], get(path, limit=250), 0
+    while True:
+        pages += 1
+        for bill in data.get("bills") or []:
+            title = (bill.get("title") or "").lower()
+            if all(w in title for w in words):
+                matches.append(bill)
+        next_url = (data.get("pagination") or {}).get("next")
+        if not next_url or pages >= SCAN_PAGES or len(matches) >= args.num:
+            break
+        data = get(next_url)
+    if not matches:
+        print(f"No bills in the {ordinal(congress)} Congress with all of {words} in the title "
+              f"(scanned the {pages * 250} most recently updated). Try fewer or different words.")
+        return
+    print(f"{min(len(matches), args.num)} bills in the {ordinal(congress)} Congress matching: {' '.join(args.words)}\n")
+    for i, b in enumerate(matches[: args.num], 1):
+        bill_type = (b.get("type") or "").lower()
+        print(f"{i}. {b.get('title') or '(untitled)'}")
+        print(f"   {b.get('congress')} {bill_type.upper()} {b.get('number')}   ->  congress bill {b.get('congress')} {bill_type} {b.get('number')}")
+        action = b.get("latestAction") or {}
+        if action:
+            print(f"   Latest: {action.get('actionDate', '')} {action.get('text', '')}")
+        print(f"   {bill_url(b.get('congress'), bill_type, b.get('number'))}")
+        print()
+
+
+def bill(args):
+    bill_type = args.type.lower()
+    if bill_type not in BILL_TYPES:
+        fail(f"bill type must be one of: {', '.join(BILL_TYPES)}")
+    base = f"bill/{args.congress}/{bill_type}/{args.number}"
+    b = get(base).get("bill") or {}
+    print(f"{args.congress} {bill_type.upper()} {args.number}: {b.get('title') or '(untitled)'}")
+    print(bill_url(args.congress, bill_type, args.number))
+    if b.get("introducedDate"):
+        print(f"Introduced: {b['introducedDate']}")
+    sponsors = b.get("sponsors") or []
+    if sponsors:
+        print(f"Sponsor: {sponsors[0].get('fullName', '')}")
+    if (b.get("policyArea") or {}).get("name"):
+        print(f"Policy area: {b['policyArea']['name']}")
+    action = b.get("latestAction") or {}
+    if action:
+        print(f"Latest action: {action.get('actionDate', '')} {action.get('text', '')}")
+
+    summaries = get(f"{base}/summaries").get("summaries") or []
+    if summaries:
+        latest = summaries[-1]
+        print(f"\nCRS summary ({latest.get('actionDesc', 'latest')}):")
+        for line in textwrap.wrap(strip_html(latest.get("text")), 100):
+            print(f"  {line}")
+
+    actions = get(f"{base}/actions", limit=10).get("actions") or []
+    if actions:
+        print("\nRecent actions:")
+        for a in actions:
+            print(f"  - {a.get('actionDate', '')}: {a.get('text', '')}")
+
+    cosponsors = get(f"{base}/cosponsors", limit=250).get("cosponsors") or []
+    if cosponsors:
+        names = [c.get("fullName", "") for c in cosponsors]
+        print(f"\nCosponsors ({len(names)}): {'; '.join(names[:15])}{' …' if len(names) > 15 else ''}")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="congress", description="U.S. bills and laws from Congress.gov.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("search", help="find bills whose title contains all the given words")
+    p.add_argument("words", nargs="+")
+    p.add_argument("--congress", type=int, help="congress number, e.g. 118 (default: current)")
+    p.add_argument("--type", choices=BILL_TYPES, help="bill type (default: all)")
+    p.add_argument("--num", type=int, default=10, help="max results (default 10)")
+    p.set_defaults(run=search)
+    p = sub.add_parser("bill", help="details of one bill: summary, actions, cosponsors")
+    p.add_argument("congress", type=int)
+    p.add_argument("type", metavar="TYPE", help="hr, s, hjres, sjres, hconres, sconres, hres, or sres")
+    p.add_argument("number", type=int)
+    p.set_defaults(run=bill)
+    args = parser.parse_args()
+    args.run(args)
+
+
+if __name__ == "__main__":
+    main()

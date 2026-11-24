@@ -1,72 +1,27 @@
 ---
-name: tavily-search
-description: Search and extract live web content with Tavily via bash using tavily-search and tavily-extract. Use for current web research, source discovery, news, vendor docs, and citation-backed synthesis.
-disable-model-invocation: false
+name: tavily
+description: Search the live web and read web pages with Tavily. Use for current events, news, documentation, and any question that needs up-to-date sources.
 ---
 
-# Tavily CLI
+# Tavily web search
 
-Run `scripts/tavily-search`, `scripts/tavily-extract` with the **bash** tool. Each is a script in this skill's directory, not Pi tools and not on PATH: resolve `scripts/…` against the directory containing this SKILL.md and run the absolute path.
-
-The scripts are intentionally verbose on failure: missing keys, unknown options, missing option values, rate limits, plan limits, and Tavily HTTP errors print a specific `Error:` line to stderr and exit nonzero.
-
-## Commands
+Run the script with the bash tool. It lives in this skill's folder: use the full path, `<this skill's directory>/scripts/tavily`.
 
 ```bash
-scripts/tavily-search "query" --num 8
-scripts/tavily-search "latest AI regulation" --topic news --time-range week
-scripts/tavily-extract https://example.com/article --max-chars 4000
+scripts/tavily search "your question or keywords"
+scripts/tavily search "latest news on X" --news
+scripts/tavily extract https://example.com/page
 ```
 
-Add `--json` to either command when raw machine-readable output is more useful than the default readable text.
+- `search` prints titles, URLs, dates, and a snippet for each result (5 by default; `--num N` for more, max 20).
+- `--news` limits results to news from the past week.
+- `extract` prints the text of one or more pages (up to 10,000 characters each).
 
-## Search
+## How to use it
 
-Use **`tavily-search`** first to find candidate sources:
+1. Search first. Answer from the snippets if they are enough.
+2. Extract only the one or two pages that look most useful.
+3. Cite the URLs you used.
+4. Do not repeat the same search; each call costs credits.
 
-```bash
-scripts/tavily-search "recent AI search APIs" --num 5
-scripts/tavily-search "NVIDIA earnings guidance" --topic finance --time-range month
-scripts/tavily-search "California AI safety law update" --topic news --time-range week
-```
-
-Options:
-
-- `--num N`: result count, default 10, max 20.
-- `--topic TYPE`: `general`, `news`, or `finance`.
-- `--time-range RANGE`: `day`, `week`, `month`, or `year`.
-- `--search-depth DEPTH`: `basic` or `advanced`; default `basic`. Use `advanced` only when basic results are clearly insufficient because it can cost more credits.
-- `--max-raw-chars N`: max raw excerpt characters per result, default 2000.
-- `--json`: print the raw Tavily API response.
-
-The search script always requests raw page content, disables Tavily's generated answer, and requests usage data. Do the synthesis yourself from the returned sources.
-
-## Extract
-
-Use **`tavily-extract`** after search when one or more URLs are worth reading more deeply:
-
-```bash
-scripts/tavily-extract https://url1.example https://url2.example
-scripts/tavily-extract https://example.com/report --depth advanced --max-chars 8000
-```
-
-Options:
-
-- `--depth DEPTH`: `basic` or `advanced`; default `basic`.
-- `--max-chars N`: max content characters per URL in readable output, default 6000.
-- `--json`: print the raw Tavily API response.
-
-## Workflow
-
-1. Search with 5-10 results unless the task clearly needs broader coverage.
-2. Add `--topic news` and `--time-range` when freshness matters.
-3. Extract only the URLs that look authoritative or unusually relevant.
-4. Cite URLs from the script output in the final answer.
-5. Stop when results converge; repeated Tavily calls cost credits.
-
-## Failure Handling
-
-- If a script exits nonzero, read stderr before retrying.
-- If Tavily returns HTTP 429, report the retry guidance and avoid immediate repeated calls.
-- If Tavily returns a plan or credit limit error, tell the user and stop searching.
-- If output is too verbose, retry with fewer results or a lower character cap.
+If the script prints `Error:`, read it. A missing key means the user must run `/my-pi-api-keys`; stop and tell them.

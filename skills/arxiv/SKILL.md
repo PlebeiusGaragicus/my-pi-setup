@@ -1,79 +1,28 @@
 ---
-name: arxiv-search
-description: Search and fetch arXiv papers via bash using arxiv-search and arxiv-fetch. Use for academic paper discovery, arXiv paper lookup, and reading arXiv HTML papers for synthesis or review.
-disable-model-invocation: false
+name: arxiv
+description: Search arXiv for research papers and read a paper's full text. Use for academic papers, machine learning and physics research, and questions about a specific arXiv paper.
 ---
 
-# arXiv CLI
+# arXiv
 
-Run `scripts/arxiv-search`, `scripts/arxiv-fetch` with the **bash** tool. Each is a script in this skill's directory, not Pi tools and not on PATH: resolve `scripts/…` against the directory containing this SKILL.md and run the absolute path.
-
-The scripts use only standard Python plus `pandoc` for HTML-to-text conversion. They print readable text by default, support `--json` where useful, and print specific `Error:` lines to stderr on failure.
-
-## Commands
+Run the script with the bash tool. It lives in this skill's folder: use the full path, `<this skill's directory>/scripts/arxiv`. No API key is needed.
 
 ```bash
-scripts/arxiv-search "ti:rotary AND abs:position AND cat:cs.LG" --num 10
-scripts/arxiv-search "abs:\"rotary position embedding\" AND cat:cs.CL" --sort submittedDate
-scripts/arxiv-fetch 2104.09864
+scripts/arxiv search "rotary position embedding"
+scripts/arxiv search "diffusion language models" --recent
+scripts/arxiv read 2104.09864
 ```
 
-## Search
+- `search` prints title, arXiv ID, date, authors, and the start of the abstract (5 results by default; `--num N`, max 30).
+- `--recent` sorts newest first instead of most relevant.
+- `read` prints the whole paper as text, with `#` section headings. It accepts an ID or an arxiv.org link.
+- For precise searches you may use field prefixes: `ti:` title, `au:` author, `abs:` abstract, e.g. `"au:hinton AND ti:capsule"`.
 
-Use **`arxiv-search`** first to find candidate papers:
+## How to use it
 
-```bash
-scripts/arxiv-search "retrieval augmented generation" --num 8
-scripts/arxiv-search "ti:transformer AND cat:cs.CL" --sort relevance
-scripts/arxiv-search "cat:cs.LG AND abs:diffusion" --sort submittedDate
-```
+1. Search, then pick the best paper from the results.
+2. Read a paper only when the abstract is not enough. Papers are long; focus on the sections that answer the question.
+3. Lead with what the paper does and finds, not its authors or dates. Mention section names when you cite details.
+4. Search at most once per question unless the query changes; arXiv asks for gentle use.
 
-Options:
-
-- `--num N`: result count, default 10, max 50.
-- `--sort SORT`: `relevance`, `submittedDate`, or `lastUpdatedDate`; default `relevance`. Use `submittedDate` for recent/latest requests.
-- `--json`: print parsed results as JSON.
-
-Build precise queries. arXiv field prefixes include `ti:` (title), `au:` (author), `abs:` (abstract), `cat:` (category, e.g. `cs.LG`, `cs.CL`, `stat.ML`), and `all:` (everything). Combine terms with `AND`, `OR`, and `ANDNOT`.
-
-Avoid naked `all:` plus wide `OR` for ambiguous terms. For short tokens like RoPE, MoE, or RAG, restrict to `ti:` or `abs:` and add `cat:` constraints. If the user provides an arXiv id, use `id:<id>` rather than broad search.
-
-## Fetch
-
-Use **`arxiv-fetch`** after search when one paper is worth reading more deeply:
-
-```bash
-scripts/arxiv-fetch 1706.03762
-scripts/arxiv-fetch 1706.03762 --max-chars 12000
-scripts/arxiv-fetch https://arxiv.org/abs/2104.09864 --output /tmp/arxiv-2104.09864.txt
-```
-
-Options:
-
-- Default stdout is the **full** converted plain text (no truncation). Host tools may still cap captured output; use `--output` to a workspace file when you need the entire file on disk.
-- `--max-chars N`: optional; truncate stdout to N characters and append `...[truncated]` (for quick previews only).
-- `--output PATH`: write the full converted text to a file and print a short status line.
-
-Never fetch the PDF unless explicitly instructed. If the script says the paper has no arXiv HTML version, tell the user and stop unless they ask for another retrieval path or were clear about wanting PDF versions.
-
-## Synthesis and human-facing summaries
-
-1. Deprioritize routine metadata in prose — do not open with or dwell on: full author lists, submission/update dates, or arXiv category taxonomy (cs.GT, etc.). Those are discovery fields from search output, not summary content. - focus on paper substance instead
-1. Lead with substance — First 1–3 sentences: what the paper studies, the core idea or method, and the main takeaway or limitation relevant to the user’s question. No preamble like “This paper is titled…” unless the user asked for a formal citation block.
-1. Tie to the question — restate how each point answers the user’s task; avoid abstract dumps that restate the arXiv abstract without framing.
-1. Provide section/subsection when covering paper contents.  Without being too verbose or repeating concepts, try to cover all aspects of the paper.
-
-## Workflow
-
-1. Search with 5-10 results unless the task clearly needs broader coverage.
-2. Answer the user's actual question in the same turn using the search results when possible; do not return only a list unless they asked for one.
-3. Fetch full paper text only after a specific candidate is selected or clearly necessary.
-4. For paper-specific answers, cite paper section headings. Quote sparingly; prefer paraphrase with section references.
-5. Run at most one equivalent search per user message. Re-search only when the query changes.
-6. Be polite: arXiv asks for about 1 request per second at most; never poll.
-
-## Failure Handling
-
-- If a script exits nonzero, read stderr before retrying.
-- If search returns no results, suggest broadening the query by dropping field prefixes, removing `AND` clauses, or trying synonyms.
-- If **search** output is too verbose, retry with fewer results. For **fetch**, use `--max-chars` only when you want a short stdout preview; otherwise rely on full stdout or `--output`.
+If `read` says there is no HTML version, tell the user. Do not download the PDF unless they ask.

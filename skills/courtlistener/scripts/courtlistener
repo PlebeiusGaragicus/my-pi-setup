@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""U.S. case law from CourtListener (REST API v4). Python 3 standard library only.
+
+  courtlistener search "query" [--type opinions|dockets|judges|oral-arguments] [--num N]
+  courtlistener case CLUSTER_ID
+  courtlistener cite "text containing citations, e.g. 410 U.S. 113"
+
+Needs COURTLISTENER_API_TOKEN (free account) in the shell environment or ~/.pi/my-pi-setup/.env.
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from html.parser import HTMLParser
+
+SITE = "https://www.courtlistener.com"
+API = SITE + "/api/rest/v4/"
+KEY_NAME = "COURTLISTENER_API_TOKEN"
+TYPES = {"opinions": "o", "dockets": "r", "judges": "p", "oral-arguments": "oa"}
+
+
+def load_key(name):
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = os.environ.get("MY_PI_ENV_FILE") or os.path.expanduser("~/.pi/my-pi-setup/.env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, sep, val = line.strip().removeprefix("export ").partition("=")
+                if sep and key.strip() == name:
+                    return val.strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def call(url, form=None):
+    key = load_key(KEY_NAME)
+    if not key:
+        fail(f"{KEY_NAME} is not set. Ask the user to run /my-pi-api-keys in Pi "
+             "(free token at courtlistener.com/profile/api/). Do not retry until it is set.")
+    if not url.startswith("http"):
+        url = API + url
+    data = urllib.parse.urlencode(form).encode() if form else None
+    request = urllib.request.Request(url, data=data, headers={"Authorization": f"Token {key}", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()[:500]
+        hint = f" Check {KEY_NAME}." if exc.code in (401, 403) else ""
+        fail(f"CourtListener HTTP {exc.code}.{hint} {detail}")
+    except urllib.error.URLError as exc:
+        fail(f"could not reach CourtListener: {exc.reason}")
+
+
+class _Text(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("p", "br", "div", "blockquote", "li", "h1", "h2", "h3", "h4", "pre"):
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def html_to_text(html):
+    parser = _Text()
+    parser.feed(html or "")
+    lines = [" ".join(line.split()) for line in "".join(parser.parts).splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def one_line(text):
+    return " ".join(re.sub(r"<[^>]+>", "", text or "").split())
+
+
+def search(args):
+    query = " ".join(args.query)
+    params = urllib.parse.urlencode({"q": query, "type": TYPES[args.type], "highlight": "on"})
+    results = (call(f"search/?{params}").get("results") or [])[: max(1, min(args.num, 20))]
+    if not results:
+        print("No results.")
+        return
+    print(f"{len(results)} {args.type} for: {query}\n")
+    for i, r in enumerate(results, 1):
+        print(f"{i}. {one_line(r.get('caseName') or r.get('name') or '(untitled)')}")
+        details = [r.get("court") or r.get("court_citation_string"), r.get("dateFiled") or r.get("dateArgued"),
+                   r.get("docketNumber") and f"Docket {r['docketNumber']}"]
+        if r.get("citation"):
+            details.append("; ".join(r["citation"]))
+        print("   " + " · ".join(str(d) for d in details if d))
+        if r.get("cluster_id"):
+            print(f"   Cluster ID: {r['cluster_id']}")
+        if r.get("absolute_url"):
+            print(f"   {SITE}{r['absolute_url']}")
+        snippet = one_line((r.get("opinions") or [{}])[0].get("snippet") or r.get("snippet"))
+        if snippet:
+            print(f"   {snippet[:400]}")
+        print()
+    if args.type == "opinions":
+        print("To read a case: courtlistener case CLUSTER_ID")
+
+
+def case(args):
+    cluster = call(f"clusters/{args.cluster_id}/")
+    print(cluster.get("case_name") or cluster.get("case_name_full") or "(untitled)")
+    cites = ["{volume} {reporter} {page}".format(**c) for c in cluster.get("citations") or []]
+    print(" · ".join(x for x in [cluster.get("date_filed"), "; ".join(cites)] if x))
+    if cluster.get("absolute_url"):
+        print(SITE + cluster["absolute_url"])
+    for opinion_url in cluster.get("sub_opinions") or []:
+        opinion = call(opinion_url)
+        text = (opinion.get("plain_text") or "").strip()
+        if not text:
+            for field in ("html_with_citations", "html", "html_lawbox", "html_columbia", "xml_harvard"):
+                if opinion.get(field):
+                    text = html_to_text(opinion[field])
+                    break
+        author = opinion.get("author_str") or ""
+        print("\n" + "=" * 80)
+        print(f"Opinion ({opinion.get('type', 'unknown type')}){' by ' + author if author else ''}")
+        print("=" * 80 + "\n")
+        print(text or "(no text available)")
+
+
+def cite(args):
+    results = call("citation-lookup/", form={"text": " ".join(args.text)})
+    if not results:
+        print("No citations found in the text.")
+        return
+    for r in results:
+        status = r.get("status")
+        print(f"{r.get('citation', '?')}: {'found' if status == 200 else f'NOT FOUND (status {status})'}")
+        for c in r.get("clusters") or []:
+            print(f"   {c.get('case_name', '(untitled)')} ({c.get('date_filed', '?')}) · Cluster ID: {c.get('id')}")
+            if c.get("absolute_url"):
+                print(f"   {SITE}{c['absolute_url']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="courtlistener", description="U.S. case law from CourtListener.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("search", help="search case law, dockets, judges, or oral arguments")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--type", choices=TYPES, default="opinions", help="what to search (default: opinions)")
+    p.add_argument("--num", type=int, default=5, help="number of results (default 5, max 20)")
+    p.set_defaults(run=search)
+    p = sub.add_parser("case", help="print a case's details and full opinion text")
+    p.add_argument("cluster_id", metavar="CLUSTER_ID")
+    p.set_defaults(run=case)
+    p = sub.add_parser("cite", help="check whether legal citations exist and which cases they name")
+    p.add_argument("text", nargs="+")
+    p.set_defaults(run=cite)
+    args = parser.parse_args()
+    args.run(args)
+
+
+if __name__ == "__main__":
+    main()

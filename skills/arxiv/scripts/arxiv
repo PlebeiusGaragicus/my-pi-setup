@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Search arXiv and read papers as plain text. Python 3 standard library only; no API key.
+
+  arxiv search "query" [--num N] [--recent]
+  arxiv read ID_OR_URL
+"""
+
+import argparse
+import re
+import sys
+import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
+
+SEARCH_API = "https://export.arxiv.org/api/query"
+HEADERS = {"User-Agent": "my-pi-setup-arxiv/1.0"}
+ATOM = {"a": "http://www.w3.org/2005/Atom"}
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def get(url):
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=60) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise FileNotFoundError(url) from exc
+        fail(f"arXiv HTTP {exc.code} for {url}")
+    except urllib.error.URLError as exc:
+        fail(f"could not reach arXiv: {exc.reason}")
+
+
+# ---------------------------------------------------------------- search
+
+def clean(text):
+    return " ".join((text or "").split())
+
+
+def search(args):
+    query = " ".join(args.query)
+    # Plain words search all fields; arXiv field prefixes (ti:, au:, abs:, cat:) also work.
+    if not re.search(r"\b(ti|au|abs|cat|all|id):", query):
+        query = " AND ".join(f"all:{word}" for word in query.split())
+    params = urllib.parse.urlencode({
+        "search_query": query,
+        "max_results": max(1, min(args.num, 30)),
+        "sortBy": "submittedDate" if args.recent else "relevance",
+        "sortOrder": "descending",
+    })
+    root = ET.fromstring(get(f"{SEARCH_API}?{params}"))
+    entries = root.findall("a:entry", ATOM)
+    if not entries:
+        print("No results. Try fewer or broader words.")
+        return
+    print(f"{len(entries)} papers for: {' '.join(args.query)}\n")
+    for i, e in enumerate(entries, 1):
+        paper_id = clean(e.findtext("a:id", "", ATOM)).rsplit("/abs/", 1)[-1]
+        authors = [clean(a.findtext("a:name", "", ATOM)) for a in e.findall("a:author", ATOM)]
+        print(f"{i}. {clean(e.findtext('a:title', '', ATOM))}")
+        print(f"   ID: {paper_id}   Published: {e.findtext('a:published', '', ATOM)[:10]}")
+        print(f"   Authors: {', '.join(authors[:3])}{' et al.' if len(authors) > 3 else ''}")
+        abstract = clean(e.findtext("a:summary", "", ATOM))
+        if len(abstract) > 500:
+            abstract = abstract[:500].rsplit(" ", 1)[0] + " …"
+        for line in textwrap.wrap(abstract, 100):
+            print(f"   {line}")
+        print()
+    print("To read a paper: arxiv read ID")
+
+
+# ---------------------------------------------------------------- read
+
+BLOCK = {"p", "div", "section", "article", "li", "tr", "br", "figcaption", "caption", "table", "blockquote"}
+SKIP = {"script", "style", "nav", "header", "footer", "button", "svg"}
+HEADINGS = {"h1": "# ", "h2": "## ", "h3": "### ", "h4": "#### ", "h5": "##### ", "h6": "###### "}
+
+
+class PaperText(HTMLParser):
+    """Turn arXiv's LaTeXML HTML into readable plain text; math becomes its LaTeX source."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out = []
+        self.skip = 0  # depth inside tags whose text we drop
+
+    def handle_starttag(self, tag, attrs):
+        if self.skip:
+            if tag in SKIP or tag == "math":
+                self.skip += 1
+            return
+        if tag in SKIP:
+            self.skip = 1
+        elif tag == "math":
+            alt = dict(attrs).get("alttext", "")
+            self.out.append(f" ${alt}$ " if alt else " ")
+            self.skip = 1
+        elif tag in HEADINGS:
+            self.out.append("\n\n" + HEADINGS[tag])
+        elif tag in BLOCK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if self.skip:
+            if tag in SKIP or tag == "math":
+                self.skip -= 1
+            return
+        if tag in HEADINGS or tag in BLOCK:
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.out.append(data)
+
+    def text(self):
+        raw = "".join(self.out)
+        lines = [" ".join(line.split()) for line in raw.splitlines()]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def paper_id_from(value):
+    value = value.strip().removeprefix("arXiv:").removeprefix("arxiv:")
+    match = re.search(r"arxiv\.org/(?:abs|pdf|html)/([^?#\s]+)", value)
+    if match:
+        value = match.group(1)
+    return value.removesuffix(".pdf").strip("/")
+
+
+def read(args):
+    paper_id = paper_id_from(args.paper)
+    try:
+        html = get(f"https://arxiv.org/html/{paper_id}").decode("utf-8", errors="replace")
+    except FileNotFoundError:
+        fail(f"arXiv has no HTML version of {paper_id}. Tell the user; do not fetch the PDF unless asked.")
+    start, end = html.find("<article"), html.rfind("</article>")
+    if start != -1 and end > start:
+        html = html[start:end]  # the paper itself, without arXiv's page chrome
+    parser = PaperText()
+    parser.feed(html)
+    print(f"arXiv {paper_id} — https://arxiv.org/abs/{paper_id}\n")
+    print(parser.text())
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="arxiv", description="Search arXiv and read papers as plain text.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("search", help="search papers")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--num", type=int, default=5, help="number of results (default 5, max 30)")
+    p.add_argument("--recent", action="store_true", help="newest first instead of most relevant")
+    p.set_defaults(run=search)
+    p = sub.add_parser("read", help="print a paper's full text")
+    p.add_argument("paper", metavar="ID_OR_URL")
+    p.set_defaults(run=read)
+    args = parser.parse_args()
+    args.run(args)
+
+
+if __name__ == "__main__":
+    main()

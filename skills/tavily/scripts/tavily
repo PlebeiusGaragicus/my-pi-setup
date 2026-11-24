@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Tavily web search and page extraction. Python 3 standard library only.
+
+  tavily search "query" [--num N] [--news]
+  tavily extract URL [URL ...]
+
+Needs TAVILY_API_KEY in the shell environment or ~/.pi/my-pi-setup/.env.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+API = "https://api.tavily.com"
+KEY_NAME = "TAVILY_API_KEY"
+MAX_CHARS = 10000  # per extracted page
+
+
+def load_key(name):
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = os.environ.get("MY_PI_ENV_FILE") or os.path.expanduser("~/.pi/my-pi-setup/.env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, sep, val = line.strip().removeprefix("export ").partition("=")
+                if sep and key.strip() == name:
+                    return val.strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def post(endpoint, body):
+    key = load_key(KEY_NAME)
+    if not key:
+        fail(f"{KEY_NAME} is not set. Ask the user to run /my-pi-api-keys in Pi. Do not retry until it is set.")
+    request = urllib.request.Request(
+        API + endpoint,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()[:500]
+        hints = {401: " Check TAVILY_API_KEY.", 429: " Rate limited; wait before retrying.",
+                 432: " Plan or credit limit reached; stop and tell the user.",
+                 433: " Plan or credit limit reached; stop and tell the user."}
+        fail(f"Tavily HTTP {exc.code}.{hints.get(exc.code, '')} {detail}")
+    except urllib.error.URLError as exc:
+        fail(f"could not reach Tavily: {exc.reason}")
+
+
+def search(args):
+    query = " ".join(args.query)
+    body = {"query": query, "max_results": max(1, min(args.num, 20)), "include_answer": False}
+    if args.news:
+        body.update(topic="news", time_range="week")
+    results = post("/search", body).get("results") or []
+    if not results:
+        print("No results.")
+        return
+    print(f"{len(results)} results for: {query}\n")
+    for i, r in enumerate(results, 1):
+        print(f"{i}. {r.get('title') or '(untitled)'}")
+        print(f"   {r.get('url', '')}")
+        if r.get("published_date"):
+            print(f"   Published: {r['published_date']}")
+        if r.get("content"):
+            print(f"   {' '.join(r['content'].split())}")
+        print()
+    print("To read a page in full: tavily extract URL")
+
+
+def extract(args):
+    data = post("/extract", {"urls": args.urls})
+    for r in data.get("results") or []:
+        text = (r.get("raw_content") or "").strip() or "(no content)"
+        print("=" * 80)
+        print(r.get("url", ""))
+        print("=" * 80)
+        print(text[:MAX_CHARS])
+        if len(text) > MAX_CHARS:
+            print(f"\n...[truncated: showing {MAX_CHARS} of {len(text)} characters]")
+        print()
+    for f in data.get("failed_results") or []:
+        print(f"Failed: {f.get('url', '?')}: {f.get('error', 'unknown error')}", file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="tavily", description="Tavily web search and page extraction.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("search", help="search the web")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--num", type=int, default=5, help="number of results (default 5, max 20)")
+    p.add_argument("--news", action="store_true", help="news from the past week only")
+    p.set_defaults(run=search)
+    p = sub.add_parser("extract", help="read the full text of one or more web pages")
+    p.add_argument("urls", nargs="+", metavar="URL")
+    p.set_defaults(run=extract)
+    args = parser.parse_args()
+    args.run(args)
+
+
+if __name__ == "__main__":
+    main()

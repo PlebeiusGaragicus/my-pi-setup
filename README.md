@@ -24,7 +24,8 @@ pi install ./my-pi-setup
 | --- | --- |
 | `/my-pi-api-keys` | Edit API keys in `~/.pi/my-pi-setup/.env` (menu, or `path` / `list` / `set KEY VALUE` / `unset KEY`) |
 | `/save` | Save the last assistant reply as a markdown file |
-| `/say`, `/stop-speaking`, `/tts-toggle`, `/tts-wpm` | Text-to-speech via macOS `say` or Linux `espeak-ng`; `--tts-enable` turns auto-speak on |
+| `/say`, `/stop-speaking`, `/tts-toggle`, `/tts-wpm` | Text-to-speech: Piper if installed (voice and speed from `~/.config/say/config`: `PIPER_MODEL`, `SAY_SPEED`; else the first voice in `~/.local/share/piper/`), otherwise macOS `say` or `espeak-ng`. `/tts-wpm` applies to `say`/`espeak-ng` only. `--tts-enable` turns auto-speak on |
+| `/focus` (`on`/`off`) | Focus mode: hide tool calls, tool output, and thinking so the transcript shows only messages and replies; `pi --focus` starts with it on |
 | `/debug-system-prompt` (`Ctrl+Q`) | Show the full effective system prompt |
 
 `pi --debug-system-prompt -p "<msg>"` prints the turn's system prompt as JSON and exits without calling the model.
@@ -41,25 +42,18 @@ pi install ./my-pi-setup
 | `/cl` | Audit changelog coverage |
 | `/re` | Prepare a release |
 
-**Skills** (`skills/`)
+**Skills** (`skills/`) — each skill is one folder: a short `SKILL.md` plus one Python 3 standard-library script in `scripts/`. No pip packages, no shared code, nothing added to `PATH`; the agent runs scripts by their full path.
 
-| Skill | Purpose | Needs |
+| Skill | Script | Needs |
 | --- | --- | --- |
-| `tavily-search` | Web search and page extraction | `TAVILY_API_KEY` |
-| `exa-search` | Web search, similar pages, page contents | `EXA_API_KEY` |
-| `arxiv-search` | arXiv search and paper fetch | `pandoc` |
-| `congress-search` | Bills, laws, members, votes from congress.gov | `CONGRESS_GOV_API_KEY` |
-| `btc-price` | Bitcoin spot price (CoinGecko) | — |
-| `ntfy` | Push notifications | `NTFY_BASE_URL` (+ optional user/password) |
-| `todo` | Shared project todo list (`todo.jsonl`) | `jq` |
-| `humanizer` | Remove signs of AI-generated writing | — |
-| `how-to-debate` | Structure debate notes into evidence-based arguments | — |
-| `courtlistener` | U.S. case law via the CourtListener API | — |
-| `random-number` | Random numbers in bash | — |
-
-`todo` and `courtlistener` set `disable-model-invocation: true`, so they are hidden from the model's skill list and load only when you invoke them explicitly.
-
-Skill scripts live in each skill's `scripts/` folder and are run by path; nothing is added to `PATH`.
+| `tavily` | `tavily search` / `extract` | `TAVILY_API_KEY` |
+| `exa` | `exa search` / `extract` / `similar` | `EXA_API_KEY` |
+| `arxiv` | `arxiv search` / `read` | — |
+| `congress` | `congress search` / `bill` | `CONGRESS_GOV_API_KEY` |
+| `courtlistener` | `courtlistener search` / `case` / `cite` | `COURTLISTENER_API_TOKEN` |
+| `btc-price` | `btc-price [currency ...]` | — |
+| `humanizer` | — (writing guide: remove signs of AI-generated text) | — |
+| `how-to-debate` | — (structure debate notes into evidence-based arguments) | — |
 
 ## API keys
 

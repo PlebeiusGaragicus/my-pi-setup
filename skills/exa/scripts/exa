@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Exa web search, page extraction, and similar-page discovery. Python 3 standard library only.
+
+  exa search "query" [--num N]
+  exa extract URL [URL ...] [--focus "what to look for"]
+  exa similar URL [--num N]
+
+Needs EXA_API_KEY in the shell environment or ~/.pi/my-pi-setup/.env.
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+API = "https://api.exa.ai"
+KEY_NAME = "EXA_API_KEY"
+MAX_CHARS = 10000  # per extracted page
+
+
+def load_key(name):
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    path = os.environ.get("MY_PI_ENV_FILE") or os.path.expanduser("~/.pi/my-pi-setup/.env")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, sep, val = line.strip().removeprefix("export ").partition("=")
+                if sep and key.strip() == name:
+                    return val.strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def fail(message):
+    print(f"Error: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def post(endpoint, body):
+    key = load_key(KEY_NAME)
+    if not key:
+        fail(f"{KEY_NAME} is not set. Ask the user to run /my-pi-api-keys in Pi. Do not retry until it is set.")
+    request = urllib.request.Request(
+        API + endpoint,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "x-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()[:500]
+        hint = " Check EXA_API_KEY." if exc.code in (401, 403) else ""
+        fail(f"Exa HTTP {exc.code}.{hint} {detail}")
+    except urllib.error.URLError as exc:
+        fail(f"could not reach Exa: {exc.reason}")
+
+
+def print_results(results, label):
+    if not results:
+        print("No results.")
+        return
+    print(f"{len(results)} results for: {label}\n")
+    for i, r in enumerate(results, 1):
+        print(f"{i}. {r.get('title') or '(untitled)'}")
+        print(f"   {r.get('url', '')}")
+        if r.get("publishedDate"):
+            print(f"   Published: {r['publishedDate'][:10]}")
+        for h in r.get("highlights") or []:
+            print(f"   {' '.join(h.split())}")
+        print()
+    print("To read a page in full: exa extract URL")
+
+
+def search(args):
+    query = " ".join(args.query)
+    body = {
+        "query": query,
+        "numResults": max(1, min(args.num, 10)),
+        "contents": {"highlights": {"query": query, "maxCharacters": 600}},
+    }
+    print_results(post("/search", body).get("results"), query)
+
+
+def similar(args):
+    body = {
+        "url": args.url,
+        "numResults": max(1, min(args.num, 10)),
+        "contents": {"highlights": {"maxCharacters": 600}},
+    }
+    print_results(post("/findSimilar", body).get("results"), f"pages similar to {args.url}")
+
+
+def extract(args):
+    body = {"urls": args.urls}
+    if args.focus:
+        body["highlights"] = {"query": args.focus, "maxCharacters": 4000}
+    else:
+        body["text"] = {"maxCharacters": MAX_CHARS}
+    data = post("/contents", body)
+    for r in data.get("results") or []:
+        print("=" * 80)
+        print(r.get("url", ""))
+        if r.get("title"):
+            print(r["title"])
+        print("=" * 80)
+        if args.focus:
+            for i, h in enumerate(r.get("highlights") or [], 1):
+                print(f"{i}. {' '.join(h.split())}")
+        else:
+            text = (r.get("text") or "").strip() or "(no content)"
+            print(text)
+            if len(text) >= MAX_CHARS:
+                print(f"\n...[truncated at {MAX_CHARS} characters]")
+        print()
+    for s in data.get("statuses") or []:
+        if s.get("status") == "error":
+            print(f"Failed: {s.get('id', '?')}: {s.get('error', 'unknown error')}", file=sys.stderr)
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="exa", description="Exa web search, page extraction, and similar pages.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    p = sub.add_parser("search", help="search the web")
+    p.add_argument("query", nargs="+")
+    p.add_argument("--num", type=int, default=5, help="number of results (default 5, max 10)")
+    p.set_defaults(run=search)
+    p = sub.add_parser("extract", help="read the text of one or more web pages")
+    p.add_argument("urls", nargs="+", metavar="URL")
+    p.add_argument("--focus", help="return only passages about this, instead of the full text")
+    p.set_defaults(run=extract)
+    p = sub.add_parser("similar", help="find pages similar to a URL")
+    p.add_argument("url", metavar="URL")
+    p.add_argument("--num", type=int, default=5, help="number of results (default 5, max 10)")
+    p.set_defaults(run=similar)
+    args = parser.parse_args()
+    args.run(args)
+
+
+if __name__ == "__main__":
+    main()

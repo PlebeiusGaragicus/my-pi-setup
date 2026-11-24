@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Current Bitcoin price from CoinGecko. Python 3 standard library only; no API key.
+
+  btc-price              price in USD
+  btc-price eur gbp      price in other currencies
+"""
+
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+API = "https://api.coingecko.com/api/v3/simple/price"
+
+
+def main():
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        print(__doc__.strip())
+        return
+    currencies = [c.lower() for c in sys.argv[1:]] or ["usd"]
+    query = urllib.parse.urlencode({"ids": "bitcoin", "vs_currencies": ",".join(currencies)})
+    request = urllib.request.Request(f"{API}?{query}", headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            prices = json.load(response).get("bitcoin") or {}
+    except (urllib.error.URLError, json.JSONDecodeError) as exc:
+        print(f"Error: CoinGecko request failed: {getattr(exc, 'reason', exc)}", file=sys.stderr)
+        sys.exit(1)
+    for currency in currencies:
+        if currency in prices:
+            print(f"BTC: {prices[currency]:,.2f} {currency.upper()}")
+        else:
+            print(f"BTC: no price for '{currency}' (use codes like usd, eur, gbp, jpy)")
+
+
+if __name__ == "__main__":
+    main()
